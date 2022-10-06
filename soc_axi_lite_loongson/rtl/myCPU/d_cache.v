@@ -25,10 +25,16 @@ module d_cache (
     localparam TAG_WIDTH    = 32 - INDEX_WIDTH - OFFSET_WIDTH;
     localparam CACHE_DEEPTH = 1 << INDEX_WIDTH;
     
-    //Cache存储单元
-    reg                 cache_valid [CACHE_DEEPTH - 1 : 0];
-    reg [TAG_WIDTH-1:0] cache_tag   [CACHE_DEEPTH - 1 : 0];
-    reg [31:0]          cache_block [CACHE_DEEPTH - 1 : 0];
+    //Cache存储单元1
+    reg                 cache_valid1 [CACHE_DEEPTH - 1 : 0];
+    reg [TAG_WIDTH-1:0] cache_tag1    [CACHE_DEEPTH - 1 : 0];
+    reg [31:0]          cache_block1 [CACHE_DEEPTH - 1 : 0];
+
+    
+    //Cache存储单元2
+    reg                 cache_valid2 [CACHE_DEEPTH - 1 : 0];
+    reg [TAG_WIDTH-1:0] cache_tag2   [CACHE_DEEPTH - 1 : 0];
+    reg [31:0]          cache_block2 [CACHE_DEEPTH - 1 : 0];
 
     //访问地址分解
     wire [OFFSET_WIDTH-1:0] offset;
@@ -39,18 +45,12 @@ module d_cache (
     assign index = cpu_data_addr[INDEX_WIDTH + OFFSET_WIDTH - 1 : OFFSET_WIDTH];
     assign tag = cpu_data_addr[31 : INDEX_WIDTH + OFFSET_WIDTH];
 
-    //访问Cache line
-    wire c_valid;
-    wire [TAG_WIDTH-1:0] c_tag;
-    wire [31:0] c_block;
-
-    assign c_valid = cache_valid[index];
-    assign c_tag   = cache_tag  [index];
-    assign c_block = cache_block[index];
 
     //判断是否命中
-    wire hit, miss;
-    assign hit = c_valid & (c_tag == tag);  //cache line的valid位为1，且tag与地址中tag相等
+    wire hit1, hit2, hit, miss;
+    assign hit1 = cache_valid1[index] & (cache_tag1[index] == tag);  //cache line的valid位为1，且tag与地址中tag相等
+    assign hit2 = cache_valid2[index] & (cache_tag2[index] == tag);  //cache line的valid位为1，且tag与地址中tag相等
+    assign hit = hit1 | hit2;
     assign miss = ~hit;
 
     //读或写
@@ -102,7 +102,7 @@ module d_cache (
     assign write_finish = write & cache_data_data_ok;
 
     //output to mips core
-    assign cpu_data_rdata   = hit ? c_block : cache_data_rdata;
+    assign cpu_data_rdata   = hit1 ? cache_block1[index] : (hit2 ? cache_block2[index] : cache_data_rdata);
     assign cpu_data_addr_ok = read & cpu_data_req & hit | cache_data_req & cache_data_addr_ok;
     assign cpu_data_data_ok = read & cpu_data_req & hit | cache_data_data_ok;
 
@@ -117,11 +117,15 @@ module d_cache (
     //保存地址中的tag, index，防止addr发生改变
     reg [TAG_WIDTH-1:0] tag_save;
     reg [INDEX_WIDTH-1:0] index_save;
+    reg group_save;
+    
     always @(posedge clk) begin
         tag_save   <= rst ? 0 :
                       cpu_data_req ? tag : tag_save;
         index_save <= rst ? 0 :
                       cpu_data_req ? index : index_save;
+        group_save <= rst ? 0 :
+                      cpu_data_req ? ((hit1 || (!hit2 && (!cache_valid1[index] || cache_valid2[index]))) ? 1'b0 : 1'b1) : group_save;
     end
 
     wire [31:0] write_cache_data;
@@ -136,24 +140,37 @@ module d_cache (
     //掩码的使用：位为1的代表需要更新的。
     //位拓展：{8{1'b1}} -> 8'b11111111
     //new_data = old_data & ~mask | write_data & mask
-    assign write_cache_data = cache_block[index] & ~{{8{write_mask[3]}}, {8{write_mask[2]}}, {8{write_mask[1]}}, {8{write_mask[0]}}} | 
+    assign write_cache_data = (hit1 ? cache_block1[index] : cache_block2[index]) & ~{{8{write_mask[3]}}, {8{write_mask[2]}}, {8{write_mask[1]}}, {8{write_mask[0]}}} | 
                               cpu_data_wdata & {{8{write_mask[3]}}, {8{write_mask[2]}}, {8{write_mask[1]}}, {8{write_mask[0]}}};
-
+    
     integer t;
     always @(posedge clk) begin
         if(rst) begin
             for(t=0; t<CACHE_DEEPTH; t=t+1) begin   //刚开始将Cache置为无效
-                cache_valid[t] <= 0;
+                cache_valid1[t] <= 0;
+                cache_valid2[t] <= 0;
             end
         end
         else begin
             if(read_finish) begin //读缺失，访存结束时
-                cache_valid[index_save] <= 1'b1;             //将Cache line置为有效
-                cache_tag  [index_save] <= tag_save;
-                cache_block[index_save] <= cache_data_rdata; //写入Cache line
+                if(group_save) begin    
+                    cache_valid2[index_save] <= 1'b1;             //将Cache line置为有效
+                    cache_tag2  [index_save] <= tag_save;
+                    cache_block2[index_save] <= cache_data_rdata; //写入Cache line
+                end
+                else begin
+                    cache_valid1[index_save] <= 1'b1;             //将Cache line置为有效
+                    cache_tag1  [index_save] <= tag_save;
+                    cache_block1[index_save] <= cache_data_rdata; //写入Cache line
+                end
             end
             else if(write & cpu_data_req & hit) begin   //写命中时需要写Cache
-                cache_block[index] <= write_cache_data;      //写入Cache line，使用index而不是index_save
+                if(hit1) begin
+                    cache_block1[index] <= write_cache_data;      //写入Cache line，使用index而不是index_save
+                end
+                else begin
+                    cache_block2[index] <= write_cache_data;      //写入Cache line，使用index而不是index_save
+                end
             end
         end
     end

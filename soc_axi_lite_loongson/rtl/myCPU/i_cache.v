@@ -25,11 +25,18 @@ module i_cache (
     localparam TAG_WIDTH    = 32 - INDEX_WIDTH - OFFSET_WIDTH;
     localparam CACHE_DEEPTH = 1 << INDEX_WIDTH;
     
-    //Cache存储单元
-    reg                 cache_valid [CACHE_DEEPTH - 1 : 0];
-    reg [TAG_WIDTH-1:0] cache_tag   [CACHE_DEEPTH - 1 : 0];
-    reg [31:0]          cache_block [CACHE_DEEPTH - 1 : 0];
+    //Cache存储单元1
+    reg                 cache_valid1 [CACHE_DEEPTH - 1 : 0];
+    // reg                 cache_dirty1 [CACHE_DEEPTH - 1 : 0];
+    reg [TAG_WIDTH-1:0] cache_tag1   [CACHE_DEEPTH - 1 : 0];
+    reg [31:0]          cache_block1 [CACHE_DEEPTH - 1 : 0];
 
+    //Cache存储单元2
+    reg                 cache_valid2 [CACHE_DEEPTH - 1 : 0];
+    // reg                 cache_dirty2 [CACHE_DEEPTH - 1 : 0];
+    reg [TAG_WIDTH-1:0] cache_tag2   [CACHE_DEEPTH - 1 : 0];
+    reg [31:0]          cache_block2 [CACHE_DEEPTH - 1 : 0];
+    
     //访问地址分解
     wire [OFFSET_WIDTH-1:0] offset;
     wire [INDEX_WIDTH-1:0] index;
@@ -39,20 +46,15 @@ module i_cache (
     assign index = cpu_inst_addr[INDEX_WIDTH + OFFSET_WIDTH - 1 : OFFSET_WIDTH];
     assign tag = cpu_inst_addr[31 : INDEX_WIDTH + OFFSET_WIDTH];
 
-    //访问Cache line
-    wire c_valid;
-    wire [TAG_WIDTH-1:0] c_tag;
-    wire [31:0] c_block;
-
-    assign c_valid = cache_valid[index];
-    assign c_tag   = cache_tag  [index];
-    assign c_block = cache_block[index];
-
     //判断是否命中
-    wire hit, miss;
-    assign hit = c_valid & (c_tag == tag);  //cache line的valid位为1，且tag与地址中tag相等
+    wire hit, hit1, hit2, miss;
+    wire [31:0] c_block;
+    assign hit1 = cache_valid1[index] & (cache_tag1[index] == tag);  //cache line1的valid位为1，且tag与地址中tag相等
+    assign hit2 = cache_valid2[index] & (cache_tag2[index] == tag);  //cache line2的valid位为1，且tag与地址中tag相等
+    assign hit = hit1 | hit2;
     assign miss = ~hit;
-
+    assign c_block = hit1 ? cache_block1[index] : cache_block2[index];
+    
     //FSM
     parameter IDLE = 2'b00, RM = 2'b01; // i cache只有read
     reg [1:0] state;
@@ -97,25 +99,36 @@ module i_cache (
     //保存地址中的tag, index，防止addr发生改变
     reg [TAG_WIDTH-1:0] tag_save;
     reg [INDEX_WIDTH-1:0] index_save;
+    reg group_save;
     always @(posedge clk) begin
         tag_save   <= rst ? 0 :
                       cpu_inst_req ? tag : tag_save;
         index_save <= rst ? 0 :
                       cpu_inst_req ? index : index_save;
+        group_save <= rst ? 0 :
+                      cpu_inst_req ? ((~cache_valid1[index] || cache_valid2[index]) ? 1'b0 : 1'b1) : group_save;
     end
 
     integer t;
     always @(posedge clk) begin
         if(rst) begin
             for(t=0; t<CACHE_DEEPTH; t=t+1) begin   //刚开始将Cache置为无效
-                cache_valid[t] <= 0;
+                cache_valid1[t] <= 0;
+                cache_valid2[t] <= 0;
             end
         end
         else begin
             if(read_finish) begin //读缺失，访存结束时
-                cache_valid[index_save] <= 1'b1;             //将Cache line置为有效
-                cache_tag  [index_save] <= tag_save;
-                cache_block[index_save] <= cache_inst_rdata; //写入Cache line
+                if(group_save) begin    
+                    cache_valid2[index_save] <= 1'b1;             //将Cache line置为有效
+                    cache_tag2  [index_save] <= tag_save;
+                    cache_block2[index_save] <= cache_inst_rdata; //写入Cache line
+                end
+                else begin
+                    cache_valid1[index_save] <= 1'b1;             //将Cache line置为有效
+                    cache_tag1  [index_save] <= tag_save;
+                    cache_block1[index_save] <= cache_inst_rdata; //写入Cache line
+                end
             end
         end
     end
